@@ -1,6 +1,9 @@
 package core
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -8,6 +11,7 @@ import (
 
 	"Emulator-fr-virtuelle-Datenbanken-gobes/pkg/model"
 	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/iterator"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 )
 
@@ -74,7 +78,7 @@ func (d *Database) loadTableSchemas() error {
 	defer d.mu.Unlock()
 
 	prefix := []byte(schemaPrefix)
-	iter := d.DB.NewIterator(util.BytesPrefix(prefix), nil)
+	iter := d.DB.NewIterator(iterator.Prefix(prefix), nil)
 	defer iter.Release()
 
 	for iter.Next() {
@@ -200,11 +204,6 @@ func (d *Database) LoadSnapshot(snapshotName string) error {
 	return nil
 }
 
-import (
-	"io"
-	"os"
-)
-
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -223,4 +222,19 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return out.Close()
+}
+
+func GetItemKey(item model.Record, schema model.TableSchema) map[string]model.AttributeValue {
+	key := make(map[string]model.AttributeValue)
+	
+	if pkAV, ok := item[schema.PartitionKey]; ok {
+		key[schema.PartitionKey] = pkAV
+	}
+	
+	if schema.SortKey != "" {
+		if skAV, ok := item[schema.SortKey]; ok {
+			key[schema.SortKey] = skAV
+		}
+	}
+	return key
 }
