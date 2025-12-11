@@ -1,4 +1,3 @@
-// pkg/core/update_actions.go
 package core
 
 import (
@@ -24,12 +23,12 @@ func ParseUpdateExpression(input *model.UpdateItemInput) (*UpdateActions, error)
     }
 
     parts := strings.Split(input.UpdateExpression, " ")
-    
+
     currentOp := ""
-    
+
     for i := 0; i < len(parts); i++ {
         part := strings.ToUpper(parts[i])
-        
+
         if part == "SET" || part == "ADD" || part == "REMOVE" || part == "DELETE" {
             currentOp = part
             continue
@@ -71,7 +70,7 @@ func ParseUpdateExpression(input *model.UpdateItemInput) (*UpdateActions, error)
                 if !ok {
                     return nil, fmt.Errorf("ADD value %s not found in ExpressionAttributeValues", valPlaceholder)
                 }
-                
+
                 actions.Add[attrName] = valAV
                 i += 1
             }
@@ -97,8 +96,12 @@ func ParseUpdateExpression(input *model.UpdateItemInput) (*UpdateActions, error)
                     return nil, fmt.Errorf("DELETE value %s not found in ExpressionAttributeValues", valPlaceholder)
                 }
                 
-                if len(valAV.S) == 0 && len(valAV.N) == 0 && len(valAV.B) == 0 {
-                    return nil, fmt.Errorf("DELETE only supports set types (SS, NS, BS)")
+                if _, ok := valAV["SS"]; !ok {
+                    if _, ok := valAV["NS"]; !ok {
+                        if _, ok := valAV["BS"]; !ok {
+                            return nil, fmt.Errorf("DELETE only supports set types (SS, NS, BS)")
+                        }
+                    }
                 }
 
                 actions.Delete[attrName] = valAV
@@ -130,31 +133,31 @@ func ApplyUpdateActions(oldRecord model.Record, actions *UpdateActions) (model.R
     for k, v := range actions.Add {
         currentAV, exists := newRecord[k]
 
-        if v.N != "" {
-            if !exists || currentAV.N == "" {
+        if _, ok := v["N"]; ok {
+            if !exists || currentAV == nil || currentAV["N"] == nil {
                 newRecord[k] = v
             } else {
-                current, err1 := model.ParseNumber(currentAV.N)
-                add, err2 := model.ParseNumber(v.N)
+                current, err1 := model.ParseNumber(currentAV["N"].(string))
+                add, err2 := model.ParseNumber(v["N"].(string))
                 if err1 != nil || err2 != nil {
                     return nil, fmt.Errorf("ADD operation failed: invalid number format for attribute %s", k)
                 }
-                newRecord[k] = model.AttributeValue{N: fmt.Sprintf("%v", current.Add(add))}
+                newRecord[k] = model.AttributeValue{"N": fmt.Sprintf("%v", current.Add(add))}
             }
-        } else if len(v.SS) > 0 || len(v.NS) > 0 || len(v.BS) > 0 {
+        } else if _, ok := v["SS"]; ok || _, ok := v["NS"]; ok || _, ok := v["BS"]; ok {
             newAV := model.UnionSets(currentAV, v)
             newRecord[k] = newAV
         } else {
             return nil, fmt.Errorf("ADD operation only supports number or set types for attribute %s", k)
         }
     }
-    
+
     for k, v := range actions.Delete {
         currentAV, exists := newRecord[k]
         if !exists {
             continue
         }
-        
+
         newAV, err := model.SubtractSets(currentAV, v)
         if err != nil {
             return nil, fmt.Errorf("DELETE operation failed: %v", err)
