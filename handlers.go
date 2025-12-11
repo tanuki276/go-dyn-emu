@@ -25,12 +25,12 @@ type CreateTableInput struct {
 func (s *Server) handleCreateTable(w http.ResponseWriter, body []byte) {
 	var input CreateTableInput
 	if err := json.Unmarshal(body, &input); err != nil {
-		http.Error(w, "Invalid JSON input", http.StatusBadRequest)
+		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
 		return
 	}
 
 	if input.TableName == "" {
-		s.writeDynamoDBError(w, "ValidationException", "TableName must be specified")
+		s.writeDynamoDBError(w, "ValidationException", "TableName must be specified", http.StatusBadRequest)
 		return
 	}
 
@@ -47,7 +47,7 @@ func (s *Server) handleCreateTable(w http.ResponseWriter, body []byte) {
 	defer s.DB.mu.Unlock()
 
 	if _, exists := s.DB.Tables[input.TableName]; exists {
-		s.writeDynamoDBError(w, "ResourceInUseException", "Table already exists")
+		s.writeDynamoDBError(w, "ResourceInUseException", "Table already exists", http.StatusBadRequest)
 		return
 	}
 
@@ -65,7 +65,7 @@ type PutItemInput struct {
 func (s *Server) handlePutItem(w http.ResponseWriter, body []byte) {
 	var input PutItemInput
 	if err := json.Unmarshal(body, &input); err != nil {
-		http.Error(w, "Invalid JSON input", http.StatusBadRequest)
+		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
 		return
 	}
 
@@ -73,13 +73,13 @@ func (s *Server) handlePutItem(w http.ResponseWriter, body []byte) {
 	schema, ok := s.DB.Tables[input.TableName]
 	s.DB.mu.RUnlock()
 	if !ok {
-		s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found")
+		s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found", http.StatusBadRequest)
 		return
 	}
 
 	pkAV, ok := input.Item[schema.PartitionKey]
 	if !ok {
-		s.writeDynamoDBError(w, "ValidationException", fmt.Sprintf("Partition Key '%s' value missing", schema.PartitionKey))
+		s.writeDynamoDBError(w, "ValidationException", fmt.Sprintf("Partition Key '%s' value missing", schema.PartitionKey), http.StatusBadRequest)
 		return
 	}
 	pkVal, _ := getAttributeValueString(pkAV)
@@ -100,6 +100,8 @@ func (s *Server) handlePutItem(w http.ResponseWriter, body []byte) {
 		return
 	}
 
+	s.DB.mu.Lock()
+	defer s.DB.mu.Unlock()
 	if err := s.DB.DB.Put([]byte(levelDBKey), value, nil); err != nil {
 		log.Printf("LevelDB Put error: %v", err)
 		http.Error(w, "Internal DB error", http.StatusInternalServerError)
@@ -118,7 +120,7 @@ type GetItemInput struct {
 func (s *Server) handleGetItem(w http.ResponseWriter, body []byte) {
 	var input GetItemInput
 	if err := json.Unmarshal(body, &input); err != nil {
-		http.Error(w, "Invalid JSON input", http.StatusBadRequest)
+		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
 		return
 	}
 
@@ -126,13 +128,13 @@ func (s *Server) handleGetItem(w http.ResponseWriter, body []byte) {
 	schema, ok := s.DB.Tables[input.TableName]
 	s.DB.mu.RUnlock()
 	if !ok {
-		s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found")
+		s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found", http.StatusBadRequest)
 		return
 	}
 
 	pkAV, ok := input.Key[schema.PartitionKey]
 	if !ok {
-		s.writeDynamoDBError(w, "ValidationException", fmt.Sprintf("Partition Key '%s' value missing", schema.PartitionKey))
+		s.writeDynamoDBError(w, "ValidationException", fmt.Sprintf("Partition Key '%s' value missing", schema.PartitionKey), http.StatusBadRequest)
 		return
 	}
 	pkVal, _ := getAttributeValueString(pkAV)
@@ -147,6 +149,8 @@ func (s *Server) handleGetItem(w http.ResponseWriter, body []byte) {
 
 	levelDBKey := buildLevelDBKey(input.TableName, pkVal, skVal)
 
+	s.DB.mu.RLock()
+	defer s.DB.mu.RUnlock()
 	value, err := s.DB.DB.Get([]byte(levelDBKey), nil)
 	if err == leveldb.ErrNotFound {
 		w.WriteHeader(http.StatusOK)
@@ -182,7 +186,7 @@ type QueryOutput struct {
 func (s *Server) handleQuery(w http.ResponseWriter, body []byte) {
 	var input QueryInput
 	if err := json.Unmarshal(body, &input); err != nil {
-		http.Error(w, "Invalid JSON input", http.StatusBadRequest)
+		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
 		return
 	}
 
@@ -190,19 +194,21 @@ func (s *Server) handleQuery(w http.ResponseWriter, body []byte) {
 	schema, ok := s.DB.Tables[input.TableName]
 	s.DB.mu.RUnlock()
 	if !ok {
-		s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found")
+		s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found", http.StatusBadRequest)
 		return
 	}
 
 	pkValuePlaceholder, ok := input.ExpressionAttributeValues[":pkval"]
 	if !ok {
-		s.writeDynamoDBError(w, "ValidationException", "Partition Key value (:pkval) not found in ExpressionAttributeValues")
+		s.writeDynamoDBError(w, "ValidationException", "Partition Key value (:pkval) not found in ExpressionAttributeValues", http.StatusBadRequest)
 		return
 	}
 	pkVal, _ := getAttributeValueString(pkValuePlaceholder)
 
 	prefix := buildLevelDBKey(input.TableName, pkVal, "")
 	
+	s.DB.mu.RLock()
+	defer s.DB.mu.RUnlock()
 	iter := s.DB.DB.NewIterator(util.BytesPrefix([]byte(prefix)), nil)
 	defer iter.Release()
     
@@ -287,14 +293,14 @@ type TransactWriteItemsInput struct {
 func (s *Server) handleTransactWriteItems(w http.ResponseWriter, body []byte) {
 	var input TransactWriteItemsInput
 	if err := json.Unmarshal(body, &input); err != nil {
-		http.Error(w, "Invalid JSON input", http.StatusBadRequest)
+		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
 		return
 	}
 
 	batch := new(leveldb.Batch)
 	
-	s.DB.mu.RLock()
-	defer s.DB.mu.RUnlock()
+	s.DB.mu.Lock()
+	defer s.DB.mu.Unlock()
 
 	for _, item := range input.TransactItems {
 		if item.ConditionCheck != nil {
@@ -319,13 +325,13 @@ func (s *Server) handleTransactWriteItems(w http.ResponseWriter, body []byte) {
 		} else if item.ConditionCheck != nil {
 			continue
 		} else {
-			s.writeDynamoDBError(w, "ValidationException", "Invalid TransactItem structure.")
+			s.writeDynamoDBError(w, "ValidationException", "Invalid TransactItem structure.", http.StatusBadRequest)
 			return
 		}
 
 		schema, ok := s.DB.Tables[tableName]
 		if !ok {
-			s.writeDynamoDBError(w, "ResourceNotFoundException", fmt.Sprintf("Table %s not found", tableName))
+			s.writeDynamoDBError(w, "ResourceNotFoundException", fmt.Sprintf("Table %s not found", tableName), http.StatusBadRequest)
 			return
 		}
 
@@ -361,7 +367,8 @@ func (s *Server) handleTransactWriteItems(w http.ResponseWriter, body []byte) {
 	w.Write([]byte(`{}`))
 }
 
-func (s *Server) writeDynamoDBError(w http.ResponseWriter, errorType string, message string) {
-	w.WriteHeader(http.StatusBadRequest)
+func (s *Server) writeDynamoDBError(w http.ResponseWriter, errorType string, message string, status int) {
+	w.WriteHeader(status)
+	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
 	fmt.Fprintf(w, `{"__type": "com.amazon.coral.service#%s", "message": "%s"}`, errorType, message)
 }
