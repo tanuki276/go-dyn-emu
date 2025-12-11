@@ -1,4 +1,3 @@
-// pkg/core/condition_evaluator.go
 package core
 
 import (
@@ -13,37 +12,6 @@ type Condition struct {
 	Operator string 
 	Operand2 string 
 }
-
-func parseCondition(expr string) (Condition, error) {
-    expr = strings.TrimSpace(expr)
-
-    if strings.Contains(expr, "(") {
-        if strings.HasPrefix(expr, "attribute_exists(") && strings.HasSuffix(expr, ")") {
-            return Condition{Type: "FUNCTION", Operator: "attribute_exists", Operand1: strings.TrimSuffix(strings.TrimPrefix(expr, "attribute_exists("), ")")}, nil
-        }
-        if strings.HasPrefix(expr, "attribute_not_exists(") && strings.HasSuffix(expr, ")") {
-            return Condition{Type: "FUNCTION", Operator: "attribute_not_exists", Operand1: strings.TrimSuffix(strings.TrimPrefix(expr, "attribute_not_exists("), ")")}, nil
-        }
-        return Condition{}, fmt.Errorf("unsupported condition function: %s", expr)
-    }
-
-    operators := []string{"<=", ">=", "=", "<", ">"}
-    
-    for _, op := range operators {
-        parts := strings.SplitN(expr, " " + op + " ", 2)
-        if len(parts) == 2 {
-            return Condition{
-                Type: "COMPARISON",
-                Operand1: strings.TrimSpace(parts[0]),
-                Operator: op,
-                Operand2: strings.TrimSpace(parts[1]),
-            }, nil
-        }
-    }
-
-    return Condition{}, fmt.Errorf("unsupported condition expression format: %s", expr)
-}
-
 
 func evaluateSingleCondition(record model.Record, cond Condition, input model.ConditionInput) (bool, error) {
     if cond.Type == "FUNCTION" {
@@ -74,7 +42,9 @@ func evaluateSingleCondition(record model.Record, cond Condition, input model.Co
         if !ok { return false, fmt.Errorf("ExpressionAttributeValue %s not found", valPlaceholder) }
         
         recordAV, exists := record[attrName]
-        if !exists { return false, nil } 
+        if !exists { 
+            return false, nil 
+        } 
 
         return model.CompareAttributeValuesByOperator(recordAV, valAV, op)
     }
@@ -82,19 +52,78 @@ func evaluateSingleCondition(record model.Record, cond Condition, input model.Co
     return false, fmt.Errorf("internal: unsupported condition type: %s", cond.Type)
 }
 
+
 func EvaluateConditionExpression(record model.Record, input model.ConditionInput) (bool, error) {
 	if input.ConditionExpression == "" {
 		return true, nil
 	}
     
-    cond, err := parseCondition(input.ConditionExpression)
-    if err != nil {
-        return false, err
+    orClauses := strings.Split(input.ConditionExpression, " OR ")
+    
+    orResult := false
+    for _, orClause := range orClauses {
+        
+        andClauses := strings.Split(orClause, " AND ")
+        
+        andResult := true
+        for _, andClause := range andClauses {
+            
+            cond, err := parseCondition(andClause)
+            if err != nil {
+                return false, err
+            }
+            
+            if record == nil && cond.Operator != "attribute_not_exists" {
+                andResult = false
+                break
+            }
+            
+            result, err := evaluateSingleCondition(record, cond, input)
+            if err != nil {
+                return false, err
+            }
+            
+            if !result {
+                andResult = false
+                break 
+            }
+        }
+        
+        if andResult {
+            orResult = true
+            break
+        }
     }
     
-    if record == nil && cond.Operator != "attribute_not_exists" {
-        return false, nil
+    return orResult, nil
+}
+
+func parseCondition(expr string) (Condition, error) {
+    expr = strings.TrimSpace(expr)
+
+    if strings.Contains(expr, "(") {
+        if strings.HasPrefix(expr, "attribute_exists(") && strings.HasSuffix(expr, ")") {
+            return Condition{Type: "FUNCTION", Operator: "attribute_exists", Operand1: strings.TrimSuffix(strings.TrimPrefix(expr, "attribute_exists("), ")")}, nil
+        }
+        if strings.HasPrefix(expr, "attribute_not_exists(") && strings.HasSuffix(expr, ")") {
+            return Condition{Type: "FUNCTION", Operator: "attribute_not_exists", Operand1: strings.TrimSuffix(strings.TrimPrefix(expr, "attribute_not_exists("), ")")}, nil
+        }
+        return Condition{}, fmt.Errorf("unsupported condition function: %s", expr)
     }
 
-    return evaluateSingleCondition(record, cond, input)
+    operators := []string{"<=", ">=", "=", "<", ">"}
+    
+    for _, op := range operators {
+        parts := strings.SplitN(expr, " " + op + " ", 2)
+        if len(parts) == 2 {
+            return Condition{
+                Type: "COMPARISON",
+                Operand1: strings.TrimSpace(parts[0]),
+                Operator: op,
+                Operand2: strings.TrimSpace(parts[1]),
+            }, nil
+        }
+    }
+
+    return Condition{}, fmt.Errorf("unsupported condition expression format: %s", expr)
 }
