@@ -24,9 +24,9 @@ func (s *Server) handlePutItem(w http.ResponseWriter, body []byte) {
         return
     }
     
-    s.DB.mu.RLock()
-    schema, ok := s.DB.Tables[input.TableName]
-    s.DB.mu.RUnlock()
+    s.Database.RLock()
+    schema, ok := s.Database.Tables[input.TableName]
+    s.Database.RUnlock()
     if !ok {
         s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found", http.StatusBadRequest)
         return
@@ -50,10 +50,10 @@ func (s *Server) handlePutItem(w http.ResponseWriter, body []byte) {
     levelDBKey := model.BuildLevelDBKey(input.TableName, pkVal, skVal)
 
 	batch := new(leveldb.Batch)
-	s.DB.mu.Lock()
-	defer s.DB.mu.Unlock()
+	s.Database.Lock()
+	defer s.Database.Unlock()
 
-	oldValue, err := s.DB.DB.Get([]byte(levelDBKey), nil)
+	oldValue, err := s.Database.DB.Get([]byte(levelDBKey), nil)
 	var oldRecord model.Record
 	recordExists := err == nil
 	if err == nil {
@@ -91,7 +91,7 @@ func (s *Server) handlePutItem(w http.ResponseWriter, body []byte) {
 	}
 	batch.Put([]byte(levelDBKey), value)
 
-	if err := s.DB.DB.Write(batch, nil); err != nil {
+	if err := s.Database.DB.Write(batch, nil); err != nil {
 		http.Error(w, "Internal DB error", http.StatusInternalServerError)
 		return
 	}
@@ -116,9 +116,9 @@ func (s *Server) handleGetItem(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	s.DB.mu.RLock()
-	schema, ok := s.DB.Tables[input.TableName]
-	s.DB.mu.RUnlock()
+	s.Database.RLock()
+	schema, ok := s.Database.Tables[input.TableName]
+	s.Database.RUnlock()
 	if !ok {
 		s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found", http.StatusBadRequest)
 		return
@@ -141,9 +141,9 @@ func (s *Server) handleGetItem(w http.ResponseWriter, body []byte) {
 
 	levelDBKey := model.BuildLevelDBKey(input.TableName, pkVal, skVal)
 
-	s.DB.mu.RLock()
-	defer s.DB.mu.RUnlock()
-	value, err := s.DB.DB.Get([]byte(levelDBKey), nil)
+	s.Database.RLock()
+	defer s.Database.RUnlock()
+	value, err := s.Database.DB.Get([]byte(levelDBKey), nil)
 	if err == leveldb.ErrNotFound {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"Item": {}}`))
@@ -176,9 +176,9 @@ func (s *Server) handleQuery(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	s.DB.mu.RLock()
-	schema, ok := s.DB.Tables[input.TableName]
-	s.DB.mu.RUnlock()
+	s.Database.RLock()
+	schema, ok := s.Database.Tables[input.TableName]
+	s.Database.RUnlock()
 	if !ok {
 		s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found", http.StatusBadRequest)
 		return
@@ -198,9 +198,9 @@ func (s *Server) handleQuery(w http.ResponseWriter, body []byte) {
 		prefix := model.BuildLevelDBKey(input.TableName, pkVal, "")
 		iteratorPrefix = []byte(prefix)
 	} else {
-		s.DB.mu.RLock()
+		s.Database.RLock()
 		gsiSchema, exists := schema.GSIs[input.IndexName]
-		s.DB.mu.RUnlock()
+		s.Database.RUnlock()
 		if !exists {
 			s.writeDynamoDBError(w, "ValidationException", fmt.Sprintf("Index %s not found", input.IndexName), http.StatusBadRequest)
 			return
@@ -212,9 +212,9 @@ func (s *Server) handleQuery(w http.ResponseWriter, body []byte) {
 	}
 
 
-	s.DB.mu.RLock()
-	defer s.DB.mu.RUnlock()
-	iter := s.DB.DB.NewIterator(util.BytesPrefix(iteratorPrefix), nil)
+	s.Database.RLock()
+	defer s.Database.RUnlock()
+	iter := s.Database.DB.NewIterator(util.BytesPrefix(iteratorPrefix), nil)
 	defer iter.Release()
 
     if len(input.ExclusiveStartKey) > 0 {
@@ -252,7 +252,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, body []byte) {
 			basePKVal := keyParts[len(keyParts)-1]
 
 			mainKey := model.BuildLevelDBKey(input.TableName, basePKVal, "") 
-			value, err = s.DB.DB.Get([]byte(mainKey), nil)
+			value, err = s.Database.DB.Get([]byte(mainKey), nil)
 		} else {
 			value = iter.Value()
 		}
@@ -305,9 +305,9 @@ func (s *Server) handleDeleteItem(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	s.DB.mu.RLock()
-	schema, ok := s.DB.Tables[input.TableName]
-	s.DB.mu.RUnlock()
+	s.Database.RLock()
+	schema, ok := s.Database.Tables[input.TableName]
+	s.Database.RUnlock()
 	if !ok {
 		s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found", http.StatusBadRequest)
 		return
@@ -328,10 +328,10 @@ func (s *Server) handleDeleteItem(w http.ResponseWriter, body []byte) {
 	}
 	levelDBKey := model.BuildLevelDBKey(input.TableName, pkVal, skVal)
 
-	s.DB.mu.Lock()
-	defer s.DB.mu.Unlock()
+	s.Database.Lock()
+	defer s.Database.Unlock()
 
-	oldValue, err := s.DB.DB.Get([]byte(levelDBKey), nil)
+	oldValue, err := s.Database.DB.Get([]byte(levelDBKey), nil)
 	recordExists := err == nil
 	var oldRecord model.Record
 	
@@ -374,7 +374,7 @@ func (s *Server) handleDeleteItem(w http.ResponseWriter, body []byte) {
 
 	batch.Delete([]byte(levelDBKey))
 
-	if err := s.DB.DB.Write(batch, nil); err != nil {
+	if err := s.Database.DB.Write(batch, nil); err != nil {
 		http.Error(w, "Internal DB error on write", http.StatusInternalServerError)
 		return
 	}
@@ -400,9 +400,9 @@ func (s *Server) handleUpdateItem(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	s.DB.mu.RLock()
-	schema, ok := s.DB.Tables[input.TableName]
-	s.DB.mu.RUnlock()
+	s.Database.RLock()
+	schema, ok := s.Database.Tables[input.TableName]
+	s.Database.RUnlock()
 	if !ok {
 		s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found", http.StatusBadRequest)
 		return
@@ -423,10 +423,10 @@ func (s *Server) handleUpdateItem(w http.ResponseWriter, body []byte) {
 	}
 	levelDBKey := model.BuildLevelDBKey(input.TableName, pkVal, skVal)
 
-	s.DB.mu.Lock()
-	defer s.DB.mu.Unlock()
+	s.Database.Lock()
+	defer s.Database.Unlock()
 
-	oldValue, err := s.DB.DB.Get([]byte(levelDBKey), nil)
+	oldValue, err := s.Database.DB.Get([]byte(levelDBKey), nil)
 	oldRecord := make(model.Record)
     recordExists := err == nil
 	if err != leveldb.ErrNotFound && err != nil {
@@ -492,7 +492,7 @@ func (s *Server) handleUpdateItem(w http.ResponseWriter, body []byte) {
 	}
 	batch.Put([]byte(levelDBKey), value)
 
-	if err := s.DB.DB.Write(batch, nil); err != nil {
+	if err := s.Database.DB.Write(batch, nil); err != nil {
 		http.Error(w, "Internal DB error on write", http.StatusInternalServerError)
 		return
 	}
@@ -541,14 +541,14 @@ func (s *Server) handleTransactWriteItems(w http.ResponseWriter, body []byte) {
 
 	batch := new(leveldb.Batch)
 
-	s.DB.mu.Lock()
-	defer s.DB.mu.Unlock()
+	s.Database.Lock()
+	defer s.Database.Unlock()
 
 	for _, item := range input.TransactItems {
 		if item.ConditionCheck != nil {
 			cc := item.ConditionCheck
 			
-			schema, ok := s.DB.Tables[cc.TableName]
+			schema, ok := s.Database.Tables[cc.TableName]
 			if !ok {
 				s.writeDynamoDBError(w, "ResourceNotFoundException", fmt.Sprintf("Table %s not found", cc.TableName), http.StatusBadRequest)
 				return
@@ -565,7 +565,7 @@ func (s *Server) handleTransactWriteItems(w http.ResponseWriter, body []byte) {
 
 			levelDBKey := model.BuildLevelDBKey(cc.TableName, pkVal, skVal)
 
-			oldValue, err := s.DB.DB.Get([]byte(levelDBKey), nil)
+			oldValue, err := s.Database.DB.Get([]byte(levelDBKey), nil)
 			var recordForEvaluation model.Record
 			
 			if err != nil && err != leveldb.ErrNotFound {
@@ -619,7 +619,7 @@ func (s *Server) handleTransactWriteItems(w http.ResponseWriter, body []byte) {
 			return
 		}
 
-		schema, ok := s.DB.Tables[tableName]
+		schema, ok := s.Database.Tables[tableName]
 		if !ok {
 			s.writeDynamoDBError(w, "ResourceNotFoundException", fmt.Sprintf("Table %s not found", tableName), http.StatusBadRequest)
 			return
@@ -639,7 +639,7 @@ func (s *Server) handleTransactWriteItems(w http.ResponseWriter, body []byte) {
 
 		levelDBKey := model.BuildLevelDBKey(tableName, pkVal, skVal)
 
-		oldValue, err := s.DB.DB.Get([]byte(levelDBKey), nil)
+		oldValue, err := s.Database.DB.Get([]byte(levelDBKey), nil)
 		var oldRecord model.Record
 		if err != leveldb.ErrNotFound && err != nil {
 			http.Error(w, "Internal DB error", http.StatusInternalServerError)
@@ -662,7 +662,7 @@ func (s *Server) handleTransactWriteItems(w http.ResponseWriter, body []byte) {
 		}
 	}
 
-	if err := s.DB.DB.Write(batch, nil); err != nil {
+	if err := s.Database.DB.Write(batch, nil); err != nil {
 		s.writeDynamoDBError(w, "InternalServerError", "Internal DB error during transaction write.", http.StatusInternalServerError)
 		return
 	}
