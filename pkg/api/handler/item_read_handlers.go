@@ -4,17 +4,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
-    
-	"github.com/syndtr/goleveldb/leveldb"
-	"github.com/syndtr/goleveldb/leveldb/util"
+
 	"Emulator-fr-virtuelle-Datenbanken-gobes/pkg/core"
 	"Emulator-fr-virtuelle-Datenbanken-gobes/pkg/model"
+	"github.com/syndtr/goleveldb/leveldb/iterator"
 )
 
 type GetItemInput struct {
 	TableName string `json:"TableName"`
-	Key map[string]model.AttributeValue `json:"Key"`
+	Key model.Record `json:"Key"`
 }
 
 func (s *Server) handleGetItem(w http.ResponseWriter, body []byte) {
@@ -41,8 +41,7 @@ func (s *Server) handleGetItem(w http.ResponseWriter, body []byte) {
 
 	var skVal string
 	if schema.SortKey != "" {
-		skAV, ok := input.Key[schema.SortKey]
-		if ok {
+		if skAV, ok := input.Key[schema.SortKey]; ok {
 			skVal, _ = model.GetAttributeValueString(skAV)
 		}
 	}
@@ -50,31 +49,37 @@ func (s *Server) handleGetItem(w http.ResponseWriter, body []byte) {
 	levelDBKey := model.BuildLevelDBKey(input.TableName, pkVal, skVal)
 
 	s.Database.RLock()
-	defer s.Database.RUnlock()
 	value, err := s.Database.DB.Get([]byte(levelDBKey), nil)
+	s.Database.RUnlock()
+
 	if err == leveldb.ErrNotFound {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"Item": {}}`))
+		w.Write([]byte(`{}`))
 		return
 	}
 	if err != nil {
-		http.Error(w, "Internal DB error", http.StatusInternalServerError)
+		s.writeDynamoDBError(w, "InternalServerError", "Internal DB error", http.StatusInternalServerError)
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"Item": %s}`, string(value))
-}
+	var record model.Record
+	if err := model.UnmarshalRecord(value, &record); err != nil {
+		s.writeDynamoDBError(w, "InternalServerError", "Failed to unmarshal item", http.StatusInternalServerError)
+		return
+	}
 
-type QueryOutput struct {
-	Items []model.Record `json:"Items"`
-	Count int `json:"Count"`
-	ScannedCount int `json:"ScannedCount"`
-	LastEvaluatedKey model.Record `json:"LastEvaluatedKey,omitempty"`
+	respBody, _ := json.Marshal(struct {
+		Item model.Record `json:"Item"`
+	}{
+		Item: record,
+	})
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(respBody)
 }
 
 func (s *Server) handleQuery(w http.ResponseWriter, body []byte) {
-    var input model.QueryInput
+	var input model.QueryInput
 	if err := json.Unmarshal(body, &input); err != nil {
 		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
 		return
@@ -88,119 +93,159 @@ func (s *Server) handleQuery(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	pkValuePlaceholder, ok := input.ExpressionAttributeValues[":pkval"]
-	if !ok {
-		s.writeDynamoDBError(w, "ValidationException", "Partition Key value (:pkval) not found in ExpressionAttributeValues", http.StatusBadRequest)
-		return
-	}
-	pkVal, _ := model.GetAttributeValueString(pkValuePlaceholder)
-
-	var iteratorPrefix []byte
-	var isGSIQuery bool = false
-
-	if input.IndexName == "" {
-		prefix := model.BuildLevelDBKey(input.TableName, pkVal, "")
-		iteratorPrefix = []byte(prefix)
-	} else {
-		s.Database.RLock()
-		gsiSchema, exists := schema.GSIs[input.IndexName]
-		s.Database.RUnlock()
-		if !exists {
-			s.writeDynamoDBError(w, "ValidationException", fmt.Sprintf("Index %s not found", input.IndexName), http.StatusBadRequest)
+	pkName := schema.PartitionKey
+	skName := schema.SortKey
+	
+	if input.IndexName != "" {
+		gsiSchema, ok := schema.GSIs[input.IndexName]
+		if !ok {
+			s.writeDynamoDBError(w, "ValidationException", fmt.Sprintf("GSI %s not found on table %s", input.IndexName, input.TableName), http.StatusBadRequest)
 			return
 		}
-
-		prefix := model.BuildGSILevelDBKey(gsiSchema.IndexName, pkVal, "", "")
-		iteratorPrefix = []byte(prefix)
-		isGSIQuery = true
+		pkName = gsiSchema.PartitionKey
+		skName = gsiSchema.SortKey
 	}
 
+	pkValue, pkOp, err := core.ParseKeyConditionPK(input.KeyConditionExpression, pkName, input.ExpressionAttributeValues)
+	if err != nil {
+		s.writeDynamoDBError(w, "ValidationException", err.Error(), http.StatusBadRequest)
+		return
+	}
+	if pkOp != "=" {
+		s.writeDynamoDBError(w, "ValidationException", "Partition key must use '=' operator in Query", http.StatusBadRequest)
+		return
+	}
+
+	var skExpression string
+	if skName != "" {
+		skExpression, err = core.ExtractKeyConditionSK(input.KeyConditionExpression, skName)
+		if err != nil {
+			s.writeDynamoDBError(w, "ValidationException", err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	
+	var prefix []byte
+	if input.IndexName != "" {
+		prefix = []byte(model.BuildGSILevelDBKey(input.IndexName, pkValue, "", ""))
+	} else {
+		prefix = []byte(model.BuildLevelDBKey(input.TableName, pkValue, ""))
+	}
 
 	s.Database.RLock()
 	defer s.Database.RUnlock()
-	iter := s.Database.DB.NewIterator(util.BytesPrefix(iteratorPrefix), nil)
+
+	iter := s.Database.DB.NewIterator(iterator.Prefix(prefix), nil)
 	defer iter.Release()
+	
+	items := make([]model.Record, 0)
+	count := 0
+	limit := int(input.Limit)
+	if limit == 0 {
+		limit = -1 
+	}
 
-    if len(input.ExclusiveStartKey) > 0 {
-        startPKAV, _ := input.ExclusiveStartKey[schema.PartitionKey]
-        startSKAV, _ := input.ExclusiveStartKey[schema.SortKey]
+	startKeyReached := input.ExclusiveStartKey == nil || len(input.ExclusiveStartKey) == 0
+	
+	// Skip logic based on ExclusiveStartKey
+	if !startKeyReached {
+		var startKeyDBKey string
+		if input.IndexName != "" {
+			gsiSchema := schema.GSIs[input.IndexName]
+			startPKAV := input.ExclusiveStartKey[gsiSchema.PartitionKey]
+			startPKVal, _ := model.GetAttributeValueString(startPKAV)
+			
+			startSKVal := ""
+			if gsiSchema.SortKey != "" {
+				startSKAV := input.ExclusiveStartKey[gsiSchema.SortKey]
+				startSKVal, _ = model.GetAttributeValueString(startSKAV)
+			}
+			
+			basePKAV := input.ExclusiveStartKey[schema.PartitionKey]
+			basePKVal, _ := model.GetAttributeValueString(basePKAV)
+			
+			startKeyDBKey = model.BuildGSILevelDBKey(input.IndexName, startPKVal, startSKVal, basePKVal)
 
-        startPKVal, _ := model.GetAttributeValueString(startPKAV)
-        startSKVal, _ := model.GetAttributeValueString(startSKAV)
-
-        exclusiveKey := model.BuildLevelDBKey(input.TableName, startPKVal, startSKVal)
-
-        if iter.Seek([]byte(exclusiveKey)) {
-             iter.Next()
-        }
-    } else {
-        iter.First()
-    }
-
-	output := QueryOutput{Items: []model.Record{}}
-
-	limit := input.Limit 
-	if limit <= 0 { limit = 1000 } 
-
-	for i := 0; i < int(limit) && iter.Valid(); iter.Next() {
-
-		var value []byte
-		var err error
-		var record model.Record
-
-		if isGSIQuery {
-			key := iter.Key()
-			keyParts := strings.Split(string(key), model.GSIKeySeparator)
-			if len(keyParts) < 4 { continue }
-
-			basePKVal := keyParts[len(keyParts)-1]
-
-			mainKey := model.BuildLevelDBKey(input.TableName, basePKVal, "") 
-			value, err = s.Database.DB.Get([]byte(mainKey), nil)
 		} else {
-			value = iter.Value()
+			startPKAV := input.ExclusiveStartKey[schema.PartitionKey]
+			startPKVal, _ := model.GetAttributeValueString(startPKAV)
+			
+			startSKVal := ""
+			if schema.SortKey != "" {
+				startSKAV := input.ExclusiveStartKey[schema.SortKey]
+				startSKVal, _ = model.GetAttributeValueString(startSKAV)
+			}
+			startKeyDBKey = model.BuildLevelDBKey(input.TableName, startPKVal, startSKVal)
 		}
 
-		if err != nil && err != leveldb.ErrNotFound {
-			continue
-		}
-
-		if err == leveldb.ErrNotFound { continue }
-
-		record, err = model.UnmarshalRecord(value)
-		if err != nil {
-			continue
-		}
-
-		output.Items = append(output.Items, record)
-		output.Count++
-		output.ScannedCount++
-		i++
-
-		if i == int(limit) && iter.Next() {
-			output.LastEvaluatedKey = record
-			iter.Prev()
-			break
+		
+		found := iter.Seek([]byte(startKeyDBKey))
+		if found && iter.Key() != nil && string(iter.Key()) == startKeyDBKey {
+			iter.Next() 
+		} else if found {
+			
 		}
 	}
 
-	responseBody, _ := json.Marshal(output)
+	for iter.Next() {
+		if limit != -1 && count >= limit {
+			break
+		}
+		
+		var record model.Record
+		if err := model.UnmarshalRecord(iter.Value(), &record); err != nil {
+			continue
+		}
+
+		if skName != "" {
+			if skAV, ok := record[skName]; ok {
+				skVal, _ := model.GetAttributeValueString(skAV)
+				if !core.EvaluateSortKeyCondition(skVal, skExpression, input.ExpressionAttributeValues) {
+					continue
+				}
+			} else if skExpression != "" {
+				continue 
+			}
+		}
+
+		items = append(items, record)
+		count++
+	}
+
+	if err := iter.Error(); err != nil {
+		s.writeDynamoDBError(w, "InternalServerError", fmt.Sprintf("Iterator error: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	lastKey := model.Record{}
+	if limit != -1 && count >= limit && len(items) > 0 {
+		lastKey = core.ExtractKey(items[len(items)-1], schema, input.IndexName)
+	}
+
+	respBody, _ := json.Marshal(struct {
+		Items []model.Record `json:"Items"`
+		Count int `json:"Count"`
+		ScannedCount int `json:"ScannedCount"`
+		LastEvaluatedKey model.Record `json:"LastEvaluatedKey,omitempty"`
+	}{
+		Items: items,
+		Count: len(items),
+		ScannedCount: len(items), 
+		LastEvaluatedKey: lastKey,
+	})
+
 	w.WriteHeader(http.StatusOK)
-	w.Write(responseBody)
+	w.Write(respBody)
 }
 
 type ScanInput struct {
 	TableName string `json:"TableName"`
-	IndexName string `json:"IndexName,omitempty"`
-	FilterExpression string `json:"FilterExpression,omitempty"`
-	ExpressionAttributeNames map[string]string `json:"ExpressionAttributeNames,omitempty"`
-	ExpressionAttributeValues map[string]model.AttributeValue `json:"ExpressionAttributeValues,omitempty"`
-	Limit int64 `json:"Limit,omitempty"`
+	Limit int64 `json:"Limit"`
 	ExclusiveStartKey model.Record `json:"ExclusiveStartKey,omitempty"`
 }
 
 func (s *Server) handleScan(w http.ResponseWriter, body []byte) {
-    var input ScanInput
+	var input ScanInput
 	if err := json.Unmarshal(body, &input); err != nil {
 		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
 		return
@@ -214,195 +259,89 @@ func (s *Server) handleScan(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	var iteratorPrefix []byte
-	isGSIQuery := false
-	
-	if input.IndexName == "" {
-		iteratorPrefix = []byte(input.TableName + model.KeySeparator)
-	} else {
-		s.Database.RLock()
-		gsiSchema, exists := schema.GSIs[input.IndexName]
-		s.Database.RUnlock()
-		if !exists {
-			s.writeDynamoDBError(w, "ValidationException", fmt.Sprintf("Index %s not found", input.IndexName), http.StatusBadRequest)
-			return
-		}
-		iteratorPrefix = []byte(gsiSchema.IndexName + model.GSIKeySeparator)
-		isGSIQuery = true
-	}
-    
-    s.Database.RLock()
-	iter := s.Database.DB.NewIterator(util.BytesPrefix(iteratorPrefix), nil)
-	defer iter.Release()
-	s.Database.RUnlock()
-    
-	if len(input.ExclusiveStartKey) > 0 {
-        startPKAV, _ := input.ExclusiveStartKey[schema.PartitionKey]
-        startSKAV, _ := input.ExclusiveStartKey[schema.SortKey]
-
-        startPKVal, _ := model.GetAttributeValueString(startPKAV)
-        startSKVal, _ := model.GetAttributeValueString(startSKAV)
-
-        exclusiveKey := model.BuildLevelDBKey(input.TableName, startPKVal, startSKVal)
-
-        if iter.Seek([]byte(exclusiveKey)) {
-             iter.Next()
-        }
-    } else {
-        iter.First()
-    }
-
-	output := QueryOutput{Items: []model.Record{}}
-
-	limit := input.Limit 
-	if limit <= 0 { limit = 1000 } 
-
-	for i := 0; i < int(limit) && iter.Valid(); iter.Next() {
-		
-		var value []byte
-		var err error
-		var record model.Record
-        
-        key := iter.Key()
-
-		if !isGSIQuery {
-			value = iter.Value()
-		} else {
-            keyParts := strings.Split(string(key), model.GSIKeySeparator)
-			if len(keyParts) < 4 { continue }
-
-			basePKVal := keyParts[len(keyParts)-1]
-
-			mainKey := model.BuildLevelDBKey(input.TableName, basePKVal, "") 
-            s.Database.RLock()
-			value, err = s.Database.DB.Get([]byte(mainKey), nil)
-            s.Database.RUnlock()
-		}
-
-		if err != nil && err != leveldb.ErrNotFound {
-			continue
-		}
-
-		if err == leveldb.ErrNotFound { continue }
-
-		record, err = model.UnmarshalRecord(value)
-		if err != nil {
-			continue
-		}
-        
-        if input.FilterExpression != "" {
-            conditionInput := model.ConditionInput{
-                ConditionExpression:       input.FilterExpression,
-                ExpressionAttributeNames:  input.ExpressionAttributeNames,
-                ExpressionAttributeValues: input.ExpressionAttributeValues,
-            }
-            
-            ok, condErr := core.EvaluateConditionExpression(record, conditionInput)
-            if condErr != nil {
-                s.writeDynamoDBError(w, "ValidationException", condErr.Error(), http.StatusBadRequest)
-                return
-            }
-            if !ok {
-                output.ScannedCount++
-                continue
-            }
-        }
-
-		output.Items = append(output.Items, record)
-		output.Count++
-		output.ScannedCount++
-		i++
-
-		if i == int(limit) && iter.Next() {
-			output.LastEvaluatedKey = record
-			iter.Prev()
-			break
-		}
-	}
-
-	responseBody, _ := json.Marshal(output)
-	w.WriteHeader(http.StatusOK)
-	w.Write(responseBody)
-}
-
-// --- BatchGetItem handler ---
-
-type KeysAndAttributes struct {
-	Keys []model.Record `json:"Keys"`
-	TableName string `json:"TableName"`
-}
-
-type BatchGetItemInput struct {
-	RequestItems map[string]KeysAndAttributes `json:"RequestItems"`
-}
-
-type BatchGetItemOutput struct {
-	Responses map[string][]model.Record `json:"Responses"`
-	UnprocessedKeys map[string]KeysAndAttributes `json:"UnprocessedKeys,omitempty"`
-}
-
-func (s *Server) handleBatchGetItem(w http.ResponseWriter, body []byte) {
-	var input BatchGetItemInput
-	if err := json.Unmarshal(body, &input); err != nil {
-		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
-		return
-	}
-
-	output := BatchGetItemOutput{Responses: make(map[string][]model.Record)}
-	
 	s.Database.RLock()
 	defer s.Database.RUnlock()
 
-	for tableName, request := range input.RequestItems {
+	iter := s.Database.DB.NewIterator(nil, nil)
+	defer iter.Release()
+
+	items := make([]model.Record, 0)
+	count := 0
+	limit := int(input.Limit)
+	if limit == 0 {
+		limit = -1 
+	}
+	
+	startKeyReached := true
+	if input.ExclusiveStartKey != nil && len(input.ExclusiveStartKey) > 0 {
+		startKeyReached = false
+		pkAV := input.ExclusiveStartKey[schema.PartitionKey]
+		pkVal, _ := model.GetAttributeValueString(pkAV)
 		
-		schema, ok := s.Database.Tables[tableName]
-		if !ok {
-			s.writeDynamoDBError(w, "ResourceNotFoundException", fmt.Sprintf("Table %s not found", tableName), http.StatusBadRequest)
-			return
-		}
-
-		if len(request.Keys) == 0 {
-			continue
+		skVal := ""
+		if schema.SortKey != "" {
+			skAV := input.ExclusiveStartKey[schema.SortKey]
+			skVal, _ = model.GetAttributeValueString(skAV)
 		}
 		
-		var items []model.Record
-		
-		for _, keyMap := range request.Keys {
-			pkAV, ok := keyMap[schema.PartitionKey]
-			if !ok {
-				s.writeDynamoDBError(w, "ValidationException", fmt.Sprintf("Partition Key '%s' value missing for table %s", schema.PartitionKey, tableName), http.StatusBadRequest)
-				return
-			}
-			pkVal, _ := model.GetAttributeValueString(pkAV)
+		startKeyDBKey := model.BuildLevelDBKey(input.TableName, pkVal, skVal)
 
-			var skVal string
-			if schema.SortKey != "" {
-				skAV, ok := keyMap[schema.SortKey]
-				if ok {
-					skVal, _ = model.GetAttributeValueString(skAV)
-				}
-			}
-
-			levelDBKey := model.BuildLevelDBKey(tableName, pkVal, skVal)
-
-			value, err := s.Database.DB.Get([]byte(levelDBKey), nil)
-			if err == nil {
-				record, err := model.UnmarshalRecord(value)
-				if err == nil {
-					items = append(items, record)
-				}
-			} else if err != leveldb.ErrNotFound {
-				http.Error(w, "Internal DB error", http.StatusInternalServerError)
-				return
-			}
-		}
-
-		if len(items) > 0 {
-			output.Responses[tableName] = items
+		if ok := iter.Seek([]byte(startKeyDBKey)); ok && string(iter.Key()) == startKeyDBKey {
+			iter.Next()
+			startKeyReached = true
+		} else if ok {
+			startKeyReached = true
 		}
 	}
+	
+	if !startKeyReached {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"message": "Internal error: Seek failed to find start key."}`))
+		return
+	}
 
-	responseBody, _ := json.Marshal(output)
+	for iter.Next() {
+		
+		keyStr := string(iter.Key())
+		if !strings.HasPrefix(keyStr, input.TableName+model.KeySeparator) {
+			continue 
+		}
+		
+		if limit != -1 && count >= limit {
+			break
+		}
+
+		var record model.Record
+		if err := model.UnmarshalRecord(iter.Value(), &record); err != nil {
+			continue
+		}
+
+		items = append(items, record)
+		count++
+	}
+
+	if err := iter.Error(); err != nil {
+		s.writeDynamoDBError(w, "InternalServerError", fmt.Sprintf("Iterator error: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	lastKey := model.Record{}
+	if limit != -1 && count >= limit && len(items) > 0 {
+		lastKey = core.ExtractKey(items[len(items)-1], schema, "") 
+	}
+
+	respBody, _ := json.Marshal(struct {
+		Items []model.Record `json:"Items"`
+		Count int `json:"Count"`
+		ScannedCount int `json:"ScannedCount"`
+		LastEvaluatedKey model.Record `json:"LastEvaluatedKey,omitempty"`
+	}{
+		Items: items,
+		Count: len(items),
+		ScannedCount: len(items), 
+		LastEvaluatedKey: lastKey,
+	})
+
 	w.WriteHeader(http.StatusOK)
-	w.Write(responseBody)
+	w.Write(respBody)
 }
