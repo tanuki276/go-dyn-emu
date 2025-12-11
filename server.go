@@ -39,13 +39,13 @@ func (s *Server) ListenAndServe(addr string) {
 
 func (s *Server) dynamoDBHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		s.writeDynamoDBError(w, "MethodNotAllowed", "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	target := r.Header.Get("X-Amz-Target")
 	if target == "" {
-		s.writeDynamoDBError(w, "MissingTargetException", "X-Amz-Target header is missing")
+		s.writeDynamoDBError(w, "MissingTargetException", "X-Amz-Target header is missing", http.StatusBadRequest)
 		return
 	}
 	
@@ -74,6 +74,6 @@ func (s *Server) dynamoDBHandler(w http.ResponseWriter, r *http.Request) {
 		s.handleTransactWriteItems(w, body)
 	default:
 		log.Printf("Unsupported operation: %s", operation)
-		s.writeDynamoDBError(w, "UnsupportedOperationException", fmt.Sprintf("Operation %s is not supported by the emulator.", operation))
+		s.writeDynamoDBError(w, "UnsupportedOperationException", fmt.Sprintf("Operation %s is not supported by the emulator.", operation), http.StatusBadRequest)
 	}
 }
