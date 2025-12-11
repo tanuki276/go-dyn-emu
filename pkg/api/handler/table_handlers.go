@@ -1,30 +1,31 @@
-// pkg/api/handler/table_handlers.go
 package handler
 
 import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-    "Emulator-fr-virtuelle-Datenbanken-gobes/pkg/core"
-    "Emulator-fr-virtuelle-Datenbanken-gobes/pkg/model"
+
+	"Emulator-fr-virtuelle-Datenbanken-gobes/pkg/model"
 )
-
-type Server struct {
-    Database *core.Database
-}
-
-func (s *Server) writeDynamoDBError(w http.ResponseWriter, errorType string, message string, status int) {
-	w.WriteHeader(status)
-	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
-	fmt.Fprintf(w, `{"__type": "com.amazon.coral.service#%s", "message": "%s"}`, errorType, message)
-}
 
 type CreateTableInput struct {
 	TableName string `json:"TableName"`
 	KeySchema []struct {
 		AttributeName string `json:"AttributeName"`
-		KeyType string `json:"KeyType"`
+		KeyType string `json:"KeyType"` 
 	} `json:"KeySchema"`
+	AttributeDefinitions []struct {
+		AttributeName string `json:"AttributeName"`
+		AttributeType string `json:"AttributeType"` 
+	} `json:"AttributeDefinitions"`
+	GlobalSecondaryIndexes []struct {
+		IndexName string `json:"IndexName"`
+		KeySchema []struct {
+			AttributeName string `json:"AttributeName"`
+			KeyType string `json:"KeyType"`
+		} `json:"KeySchema"`
+	} `json:"GlobalSecondaryIndexes,omitempty"`
+	ProvisionedThroughput struct{} `json:"ProvisionedThroughput"`
 }
 
 func (s *Server) handleCreateTable(w http.ResponseWriter, body []byte) {
@@ -34,91 +35,134 @@ func (s *Server) handleCreateTable(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	if input.TableName == "" {
-		s.writeDynamoDBError(w, "ValidationException", "TableName must be specified", http.StatusBadRequest)
-		return
+	schema := model.TableSchema{
+		TableName: input.TableName,
+		GSIs: make(map[string]model.GsiSchema),
 	}
 
-	schema := model.TableSchema{TableName: input.TableName, GSIs: make(map[string]model.GsiSchema)}
-	for _, k := range input.KeySchema {
-		if k.KeyType == "HASH" {
-			schema.PartitionKey = k.AttributeName
-		} else if k.KeyType == "RANGE" {
-			schema.SortKey = k.AttributeName
+	for _, ks := range input.KeySchema {
+		if ks.KeyType == "HASH" {
+			schema.PartitionKey = ks.AttributeName
+		} else if ks.KeyType == "RANGE" {
+			schema.SortKey = ks.AttributeName
 		}
 	}
-
-	s.Database.Lock()
-	defer s.Database.Unlock()
-
-	if _, exists := s.Database.Tables[input.TableName]; exists {
-		s.writeDynamoDBError(w, "ResourceInUseException", "Table already exists", http.StatusBadRequest)
+	
+	if schema.PartitionKey == "" {
+		s.writeDynamoDBError(w, "ValidationException", "Partition Key definition missing.", http.StatusBadRequest)
 		return
 	}
 
-	s.Database.Tables[input.TableName] = schema
+	for _, gsiInput := range input.GlobalSecondaryIndexes {
+		gsiSchema := model.GsiSchema{
+			IndexName: gsiInput.IndexName,
+		}
+		for _, ks := range gsiInput.KeySchema {
+			if ks.KeyType == "HASH" {
+				gsiSchema.PartitionKey = ks.AttributeName
+			} else if ks.KeyType == "RANGE" {
+				gsiSchema.SortKey = ks.AttributeName
+			}
+		}
+		schema.GSIs[gsiInput.IndexName] = gsiSchema
+	}
+
+	if err := s.Database.CreateTable(schema); err != nil {
+		s.writeDynamoDBError(w, "ResourceInUseException", err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(fmt.Sprintf(`{"TableDescription": {"TableName": "%s", "TableStatus": "ACTIVE"}}`, input.TableName)))
 }
 
-type DescribeTableInput struct {
-    TableName string `json:"TableName"`
+type DeleteTableInput struct {
+	TableName string `json:"TableName"`
 }
 
-func (s *Server) handleDescribeTable(w http.ResponseWriter, body []byte) {
-    var input DescribeTableInput
-    if err := json.Unmarshal(body, &input); err != nil {
-        s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
-        return
-    }
+func (s *Server) handleDeleteTable(w http.ResponseWriter, body []byte) {
+	var input DeleteTableInput
+	if err := json.Unmarshal(body, &input); err != nil {
+		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
+		return
+	}
 
-    s.Database.RLock()
-    schema, ok := s.Database.Tables[input.TableName]
-    s.Database.RUnlock()
-
-    if !ok {
-        s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found", http.StatusBadRequest)
-        return
-    }
-
-    keySchema := []map[string]string{
-        {"AttributeName": schema.PartitionKey, "KeyType": "HASH"},
-    }
-    if schema.SortKey != "" {
-        keySchema = append(keySchema, map[string]string{"AttributeName": schema.SortKey, "KeyType": "RANGE"})
-    }
-
-    response := map[string]interface{}{
-        "TableDescription": map[string]interface{}{
-            "TableName": input.TableName,
-            "TableStatus": "ACTIVE",
-            "KeySchema": keySchema,
-            "ItemCount": 0,
-        },
-    }
-
-    responseBody, _ := json.Marshal(response)
-    w.WriteHeader(http.StatusOK)
-    w.Write(responseBody)
+	s.Database.Lock()
+	defer s.Database.Unlock()
+	
+	if _, ok := s.Database.Tables[input.TableName]; !ok {
+		s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found", http.StatusBadRequest)
+		return
+	}
+	
+	delete(s.Database.Tables, input.TableName)
+	
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(fmt.Sprintf(`{"TableDescription": {"TableName": "%s", "TableStatus": "DELETING"}}`, input.TableName)))
 }
 
-type ListTablesOutput struct {
-    TableNames []string `json:"TableNames"`
+func (s *Server) handleListTables(w http.ResponseWriter) {
+	s.Database.RLock()
+	defer s.Database.RUnlock()
+
+	tableNames := make([]string, 0, len(s.Database.Tables))
+	for name := range s.Database.Tables {
+		tableNames = append(tableNames, name)
+	}
+
+	response := struct {
+		TableNames []string `json:"TableNames"`
+	}{
+		TableNames: tableNames,
+	}
+
+	respBody, _ := json.Marshal(response)
+	w.WriteHeader(http.StatusOK)
+	w.Write(respBody)
 }
 
-func (s *Server) handleListTables(w http.ResponseWriter, body []byte) {
-    s.Database.RLock()
-    defer s.Database.RUnlock()
+type SnapshotInput struct {
+	SnapshotName string `json:"SnapshotName"`
+}
 
-    tableNames := make([]string, 0, len(s.Database.Tables))
-    for name := range s.Database.Tables {
-        tableNames = append(tableNames, name)
-    }
+func (s *Server) handleCreateSnapshot(w http.ResponseWriter, body []byte) {
+	var input SnapshotInput
+	if err := json.Unmarshal(body, &input); err != nil {
+		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
+		return
+	}
 
-    output := ListTablesOutput{TableNames: tableNames}
-    responseBody, _ := json.Marshal(output)
+	if err := s.Database.CreateSnapshot(input.SnapshotName); err != nil {
+		s.writeDynamoDBError(w, "InternalServerError", fmt.Sprintf("Failed to create snapshot: %v", err), http.StatusInternalServerError)
+		return
+	}
 
-    w.WriteHeader(http.StatusOK)
-    w.Write(responseBody)
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(fmt.Sprintf(`{"SnapshotName": "%s", "Status": "COMPLETED"}`, input.SnapshotName)))
+}
+
+func (s *Server) handleLoadSnapshot(w http.ResponseWriter, body []byte) {
+	var input SnapshotInput
+	if err := json.Unmarshal(body, &input); err != nil {
+		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.Database.LoadSnapshot(input.SnapshotName); err != nil {
+		s.writeDynamoDBError(w, "ResourceNotFoundException", fmt.Sprintf("Failed to load snapshot: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(fmt.Sprintf(`{"SnapshotName": "%s", "Status": "LOADED"}`, input.SnapshotName)))
+}
+
+func (s *Server) handleDeleteAllData(w http.ResponseWriter) {
+	if err := s.Database.DeleteAllData(); err != nil {
+		s.writeDynamoDBError(w, "InternalServerError", fmt.Sprintf("Failed to delete all data: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"Status": "DELETED"}`))
 }
