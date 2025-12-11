@@ -44,3 +44,48 @@ func GetAttributeValueString(av AttributeValue) (string, bool) {
 	}
 	return "", false
 }
+
+func GetNumberSet(av AttributeValue) ([]string, bool) {
+	if nsVal, ok := av["NS"].([]interface{}); ok {
+		s := make([]string, len(nsVal))
+		for i, v := range nsVal {
+			if str, ok := v.(string); ok {
+				s[i] = str
+			} else {
+				return nil, false
+			}
+		}
+		return s, true
+	}
+	return nil, false
+}
+
+func GetStringSet(av AttributeValue) ([]string, bool) {
+	if ssVal, ok := av["SS"].([]interface{}); ok {
+		s := make([]string, len(ssVal))
+		for i, v := range ssVal {
+			if str, ok := v.(string); ok {
+				s[i] = str
+			} else {
+				return nil, false
+			}
+		}
+		return s, true
+	}
+	return nil, false
+}
+
+func GetBinarySet(av AttributeValue) ([]string, bool) {
+	if bsVal, ok := av["BS"].([]interface{}); ok {
+		s := make([]string, len(bsVal))
+		for i, v := range bsVal {
+			if str, ok := v.(string); ok {
+				s[i] = str
+			} else {
+				return nil, false
+			}
+		}
+		return s, true
+	}
+	return nil, false
+}
