@@ -5,8 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+    "Emulator-fr-virtuelle-Datenbanken-gobes/pkg/core"
     "Emulator-fr-virtuelle-Datenbanken-gobes/pkg/model"
 )
+
+type Server struct {
+    Database *core.Database
+}
+
+func (s *Server) writeDynamoDBError(w http.ResponseWriter, errorType string, message string, status int) {
+	w.WriteHeader(status)
+	w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+	fmt.Fprintf(w, `{"__type": "com.amazon.coral.service#%s", "message": "%s"}`, errorType, message)
+}
 
 type CreateTableInput struct {
 	TableName string `json:"TableName"`
@@ -37,15 +48,15 @@ func (s *Server) handleCreateTable(w http.ResponseWriter, body []byte) {
 		}
 	}
 
-	s.DB.mu.Lock()
-	defer s.DB.mu.Unlock()
+	s.Database.Lock()
+	defer s.Database.Unlock()
 
-	if _, exists := s.DB.Tables[input.TableName]; exists {
+	if _, exists := s.Database.Tables[input.TableName]; exists {
 		s.writeDynamoDBError(w, "ResourceInUseException", "Table already exists", http.StatusBadRequest)
 		return
 	}
 
-	s.DB.Tables[input.TableName] = schema
+	s.Database.Tables[input.TableName] = schema
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(fmt.Sprintf(`{"TableDescription": {"TableName": "%s", "TableStatus": "ACTIVE"}}`, input.TableName)))
@@ -62,9 +73,9 @@ func (s *Server) handleDescribeTable(w http.ResponseWriter, body []byte) {
         return
     }
 
-    s.DB.mu.RLock()
-    schema, ok := s.DB.Tables[input.TableName]
-    s.DB.mu.RUnlock()
+    s.Database.RLock()
+    schema, ok := s.Database.Tables[input.TableName]
+    s.Database.RUnlock()
 
     if !ok {
         s.writeDynamoDBError(w, "ResourceNotFoundException", "Table not found", http.StatusBadRequest)
@@ -97,11 +108,11 @@ type ListTablesOutput struct {
 }
 
 func (s *Server) handleListTables(w http.ResponseWriter, body []byte) {
-    s.DB.mu.RLock()
-    defer s.DB.mu.RUnlock()
+    s.Database.RLock()
+    defer s.Database.RUnlock()
 
-    tableNames := make([]string, 0, len(s.DB.Tables))
-    for name := range s.DB.Tables {
+    tableNames := make([]string, 0, len(s.Database.Tables))
+    for name := range s.Database.Tables {
         tableNames = append(tableNames, name)
     }
 
