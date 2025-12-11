@@ -1,63 +1,115 @@
-go-dyn-emu: A High-Fidelity DynamoDB Emulator in Go
+go-dyn-emu
 
-
----
-
-🚀 Project Introduction
-
-go-dyn-emu is a DynamoDB-compatible emulator written entirely in Go. It uses LevelDB as its persistent storage engine to reproduce DynamoDB-like behavior, making it a practical tool for local development, unit tests, and integration tests.
-
-Key Features
-
-DynamoDB API Compatibility: Supports core DynamoDB operations.
-
-Transaction Support: Implements TransactWriteItems.
-
-Secondary Indexes: Supports Global Secondary Indexes (GSI).
-
-Expression Handling: Parses and evaluates ConditionExpression and UpdateExpression.
-
-Local Persistence: Durable LevelDB-backed storage.
-
-Snapshot System: Save and restore database states instantly.
+High-Fidelity DynamoDB Emulator Implemented in Go
 
 
 
----
-
-🛠️ Installation and Setup
-
-Prerequisites
-
-Go 1.20+
-
-Properly initialized Go module
 
 
-1. Build the Emulator
+Overview
+
+go-dyn-emu is a DynamoDB emulator designed to reproduce the behavior of AWS DynamoDB with high precision using only Go.
+Its goal is to fully replicate operational logic — including ConditionExpression, UpdateExpression, GSI updates, and transaction behavior — in a local environment.
+
+It is designed not merely as an API-compatible mock, but as a simulator that mirrors the internal behavior and evaluation logic of DynamoDB.
+Additionally, it provides a snapshot system that enables fast saving and restoring of database states.
+
+
+
+
+
+Purpose
+
+1. High-Fidelity Simulation
+
+Implements essential DynamoDB APIs (Put, Get, Query, Scan, Update) in accordance with official specifications
+
+Parses and evaluates ConditionExpression and UpdateExpression, including type handling, operator precedence, and conflict resolution
+
+Performs accurate GSI updates and consistency checks internally
+
+
+2. Experimental Platform for DBI-Style Data Operation
+
+It provides a mechanism to insert transparent hooks before and after data operations, leveraging Go’s abstraction capabilities and concurrency features.
+
+GSI update logic
+
+Transaction consistency checks
+
+Future extensions for custom logic injection
+
+
+This enables inspection and analysis of datastore behavior without modifying application-level code.
+
+
+　
+
+
+Features
+
+API compatibility with DynamoDB
+Supports PutItem, GetItem, Query, Scan, UpdateItem, and other core operations.
+
+Transaction support
+Fully implements TransactWriteItems, including isolation and consistency validation.
+
+Complete expression parsing
+
+ConditionExpression
+
+UpdateExpression
+
+ExpressionAttributeNames / Values
+
+
+Implements full-stack processing (lexing, AST conversion, evaluation) to replicate DynamoDB behavior accurately.
+
+Local persistence via LevelDB
+Data persists across process restarts.
+
+Snapshot and restore
+Provides fast full-state snapshots and restoration.
+
+Fully isolated local sandbox
+Tables and data are completely separated from production environments.
+
+
+
+
+Installation
 
 go mod tidy
 go build -o dyn-emu-local
 
-2. Run the Server
 
-The emulator listens on port 8000.
+
+
+
+Execution
 
 ./dyn-emu-local
 
-3. Configure AWS CLI / SDK for Local Use
+Default endpoint: http://localhost:8000
+
+
+
+
+
+Usage from AWS CLI / SDK
 
 aws configure set dynamodb.endpoint_url http://localhost:8000
 aws configure set region us-west-2
 
-Dummy credentials are sufficient.
+Dummy credentials are acceptable.
 
 
----
 
-⚙️ Core Usage Examples
 
-1. Create a Table
+
+Examples
+
+Create a table
 
 aws dynamodb create-table \
   --table-name Users \
@@ -66,52 +118,48 @@ aws dynamodb create-table \
   --provisioned-throughput ReadCapacityUnits=1,WriteCapacityUnits=1 \
   --endpoint-url http://localhost:8000
 
-2. Put and Get Item
+Put / Get
 
-aws dynamodb put-item \
-  --table-name Users \
-  --item '{"UserID":{"S":"u123"},"Timestamp":{"N":"1678886400"},"Username":{"S":"Alice"}}' \
-  --endpoint-url http://localhost:8000
+aws dynamodb put-item ...
+aws dynamodb get-item ...
 
-aws dynamodb get-item \
-  --table-name Users \
-  --key '{"UserID":{"S":"u123"},"Timestamp":{"N":"1678886400"}}' \
-  --endpoint-url http://localhost:8000
+Conditional Update
 
-3. Update with Condition
-
-aws dynamodb update-item \
-  --table-name Users \
-  --key '{"UserID":{"S":"u123"},"Timestamp":{"N":"1678886400"}}' \
-  --update-expression "SET #UN = :newname ADD #C :incr" \
-  --condition-expression "attribute_exists(Username)" \
-  --expression-attribute-names '{"#UN":"Username","#C":"Count"}' \
-  --expression-attribute-values '{":newname":{"S":"Bob"},":incr":{"N":"1"}}' \
-  --return-values ALL_NEW \
-  --endpoint-url http://localhost:8000
+aws dynamodb update-item ...
 
 
----
 
-💾 Emulator-Specific Commands
 
-These use custom X-Amz-Target headers.
+
+Custom APIs
 
 Operation	Target	Description
 
-Create Snapshot	DynamoDB_20120810.CreateSnapshot	Save current LevelDB state to file.
-Load Snapshot	DynamoDB_20120810.LoadSnapshot	Restore LevelDB from snapshot.
-Delete All Data	DynamoDB_20120810.DeleteAllData	Full wipe including schemas.
+Create Snapshot	DynamoDB_20120810.CreateSnapshot	Save full DB state
+Load Snapshot	DynamoDB_20120810.LoadSnapshot	Restore a saved state
+Delete All Data	DynamoDB_20120810.DeleteAllData	Reset underlying LevelDB store
 
 
-Snapshot Example
 
-curl -X POST http://localhost:8000/dynamodb \
-  -H 'X-Amz-Target: DynamoDB_20120810.CreateSnapshot' \
-  -H 'Content-Type: application/x-amz-json-1.0' \
-  -d '{"SnapshotName":"baseline_state"}'
 
-curl -X POST http://localhost:8000/dynamodb \
-  -H 'X-Amz-Target: DynamoDB_20120810.LoadSnapshot' \
-  -H 'Content-Type: application/x-amz-json-1.0' \
-  -d '{"SnapshotName":"baseline_state"}'
+
+Current Limitations
+
+Category	Description
+
+Not Implemented	TransactGetItems
+Not Implemented	Deep Map/List UpdateExpression
+Bottleneck	Snapshot creation uses physical copying, slow for large DB
+Bottleneck	Scan uses full iteration
+Weakness	Error message formats not fully aligned with DynamoDB
+　　
+
+
+
+Future Work
+
+Copy-on-Write snapshot mechanism
+
+Improved accuracy of error messages
+
+Public API for custom hooks
