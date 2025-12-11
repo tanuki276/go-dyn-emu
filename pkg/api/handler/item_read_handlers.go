@@ -74,7 +74,7 @@ type QueryOutput struct {
 }
 
 func (s *Server) handleQuery(w http.ResponseWriter, body []byte) {
-	var input model.QueryInput
+    var input model.QueryInput
 	if err := json.Unmarshal(body, &input); err != nil {
 		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
 		return
@@ -200,7 +200,7 @@ type ScanInput struct {
 }
 
 func (s *Server) handleScan(w http.ResponseWriter, body []byte) {
-	var input ScanInput
+    var input ScanInput
 	if err := json.Unmarshal(body, &input); err != nil {
 		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
 		return
@@ -317,6 +317,88 @@ func (s *Server) handleScan(w http.ResponseWriter, body []byte) {
 			output.LastEvaluatedKey = record
 			iter.Prev()
 			break
+		}
+	}
+
+	responseBody, _ := json.Marshal(output)
+	w.WriteHeader(http.StatusOK)
+	w.Write(responseBody)
+}
+
+// --- BatchGetItem handler ---
+
+type KeysAndAttributes struct {
+	Keys []model.Record `json:"Keys"`
+	TableName string `json:"TableName"`
+}
+
+type BatchGetItemInput struct {
+	RequestItems map[string]KeysAndAttributes `json:"RequestItems"`
+}
+
+type BatchGetItemOutput struct {
+	Responses map[string][]model.Record `json:"Responses"`
+	UnprocessedKeys map[string]KeysAndAttributes `json:"UnprocessedKeys,omitempty"`
+}
+
+func (s *Server) handleBatchGetItem(w http.ResponseWriter, body []byte) {
+	var input BatchGetItemInput
+	if err := json.Unmarshal(body, &input); err != nil {
+		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
+		return
+	}
+
+	output := BatchGetItemOutput{Responses: make(map[string][]model.Record)}
+	
+	s.Database.RLock()
+	defer s.Database.RUnlock()
+
+	for tableName, request := range input.RequestItems {
+		
+		schema, ok := s.Database.Tables[tableName]
+		if !ok {
+			s.writeDynamoDBError(w, "ResourceNotFoundException", fmt.Sprintf("Table %s not found", tableName), http.StatusBadRequest)
+			return
+		}
+
+		if len(request.Keys) == 0 {
+			continue
+		}
+		
+		var items []model.Record
+		
+		for _, keyMap := range request.Keys {
+			pkAV, ok := keyMap[schema.PartitionKey]
+			if !ok {
+				s.writeDynamoDBError(w, "ValidationException", fmt.Sprintf("Partition Key '%s' value missing for table %s", schema.PartitionKey, tableName), http.StatusBadRequest)
+				return
+			}
+			pkVal, _ := model.GetAttributeValueString(pkAV)
+
+			var skVal string
+			if schema.SortKey != "" {
+				skAV, ok := keyMap[schema.SortKey]
+				if ok {
+					skVal, _ = model.GetAttributeValueString(skAV)
+				}
+			}
+
+			levelDBKey := model.BuildLevelDBKey(tableName, pkVal, skVal)
+
+			value, err := s.Database.DB.Get([]byte(levelDBKey), nil)
+			if err == nil {
+				record, err := model.UnmarshalRecord(value)
+				if err == nil {
+					items = append(items, record)
+				}
+			} else if err != leveldb.ErrNotFound {
+				http.Error(w, "Internal DB error", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		if len(items) > 0 {
+			output.Responses[tableName] = items
 		}
 	}
 
