@@ -1,8 +1,8 @@
 package main
 
 import (
+	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -20,7 +20,6 @@ func (s *Server) ListenAndServe(addr string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.dynamoDBHandler)
 
-	log.Printf("🚀 Starting DynamoDB emulator on %s...", addr)
 	start := time.Now()
 
 	server := &http.Server{
@@ -30,11 +29,9 @@ func (s *Server) ListenAndServe(addr string) {
 
 	go func() {
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf("Server error: %v", err)
+			
 		}
 	}()
-
-	log.Printf("✅ Startup complete! (Time taken: %s)", time.Since(start))
 }
 
 func (s *Server) dynamoDBHandler(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +51,6 @@ func (s *Server) dynamoDBHandler(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("Failed to read request body: %v", err)
 		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 		return
 	}
@@ -73,7 +69,6 @@ func (s *Server) dynamoDBHandler(w http.ResponseWriter, r *http.Request) {
 	case "TransactWriteItems":
 		s.handleTransactWriteItems(w, body)
 	default:
-		log.Printf("Unsupported operation: %s", operation)
 		s.writeDynamoDBError(w, "UnsupportedOperationException", fmt.Sprintf("Operation %s is not supported by the emulator.", operation), http.StatusBadRequest)
 	}
 }
