@@ -37,10 +37,10 @@ func evaluateSingleCondition(record model.Record, cond Condition, input model.Co
 
         attrName, ok := input.ExpressionAttributeNames[attrPlaceholder]
         if !ok { attrName = attrPlaceholder }
-        
+
         valAV, ok := input.ExpressionAttributeValues[valPlaceholder]
         if !ok { return false, fmt.Errorf("ExpressionAttributeValue %s not found", valPlaceholder) }
-        
+
         recordAV, exists := record[attrName]
         if !exists { 
             return false, nil 
@@ -57,44 +57,44 @@ func EvaluateConditionExpression(record model.Record, input model.ConditionInput
 	if input.ConditionExpression == "" {
 		return true, nil
 	}
-    
+
     orClauses := strings.Split(input.ConditionExpression, " OR ")
-    
+
     orResult := false
     for _, orClause := range orClauses {
-        
+
         andClauses := strings.Split(orClause, " AND ")
-        
+
         andResult := true
         for _, andClause := range andClauses {
-            
+
             cond, err := parseCondition(andClause)
             if err != nil {
                 return false, err
             }
-            
+
             if record == nil && cond.Operator != "attribute_not_exists" {
                 andResult = false
                 break
             }
-            
+
             result, err := evaluateSingleCondition(record, cond, input)
             if err != nil {
                 return false, err
             }
-            
+
             if !result {
                 andResult = false
                 break 
             }
         }
-        
+
         if andResult {
             orResult = true
             break
         }
     }
-    
+
     return orResult, nil
 }
 
@@ -112,7 +112,7 @@ func parseCondition(expr string) (Condition, error) {
     }
 
     operators := []string{"<=", ">=", "=", "<", ">"}
-    
+
     for _, op := range operators {
         parts := strings.SplitN(expr, " " + op + " ", 2)
         if len(parts) == 2 {
