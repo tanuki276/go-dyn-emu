@@ -1,4 +1,4 @@
-module github.com/tanuki276/Emulator-f-r-virtuelle-Datenbanken-gobes
+module go-dyn-emu
 
 go 1.24.2
 
