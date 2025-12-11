@@ -306,3 +306,101 @@ func (s *Server) handleUpdateItem(w http.ResponseWriter, body []byte) {
 	w.WriteHeader(http.StatusOK)
 	w.Write(responseBody)
 }
+
+// --- BatchWriteItem handler ---
+
+type WriteRequest struct {
+	PutRequest *struct {
+		Item model.Record `json:"Item"`
+	} `json:"PutRequest,omitempty"`
+	DeleteRequest *struct {
+		Key model.Record `json:"Key"`
+	} `json:"DeleteRequest,omitempty"`
+}
+
+type BatchWriteItemInput struct {
+	RequestItems map[string][]WriteRequest `json:"RequestItems"`
+}
+
+type BatchWriteItemOutput struct {
+	UnprocessedItems map[string][]WriteRequest `json:"UnprocessedItems,omitempty"`
+}
+
+func (s *Server) handleBatchWriteItem(w http.ResponseWriter, body []byte) {
+	var input BatchWriteItemInput
+	if err := json.Unmarshal(body, &input); err != nil {
+		s.writeDynamoDBError(w, "ValidationException", "Invalid JSON input", http.StatusBadRequest)
+		return
+	}
+
+	totalBatch := new(leveldb.Batch)
+	
+	s.Database.Lock()
+	defer s.Database.Unlock()
+
+	for tableName, requests := range input.RequestItems {
+		
+		schema, ok := s.Database.Tables[tableName]
+		if !ok {
+			s.writeDynamoDBError(w, "ResourceNotFoundException", fmt.Sprintf("Table %s not found", tableName), http.StatusBadRequest)
+			return
+		}
+
+		for _, req := range requests {
+			var pkAV model.AttributeValue
+			var itemData model.Record
+			var isDelete bool = false
+
+			if req.PutRequest != nil {
+				itemData = req.PutRequest.Item
+				pkAV = itemData[schema.PartitionKey]
+			} else if req.DeleteRequest != nil {
+				itemData = req.DeleteRequest.Key 
+				pkAV = itemData[schema.PartitionKey]
+				isDelete = true
+			} else {
+				continue
+			}
+
+			pkVal, _ := model.GetAttributeValueString(pkAV)
+
+			var skVal string
+			if schema.SortKey != "" {
+				skAV, ok := itemData[schema.SortKey]
+				if ok {
+					skVal, _ = model.GetAttributeValueString(skAV)
+				}
+			}
+
+			levelDBKey := model.BuildLevelDBKey(tableName, pkVal, skVal)
+
+			oldValue, err := s.Database.DB.Get([]byte(levelDBKey), nil)
+			var oldRecord model.Record
+			
+			if err != nil && err != leveldb.ErrNotFound {
+				http.Error(w, "Internal DB error", http.StatusInternalServerError)
+				return
+			}
+			if err == nil {
+				oldRecord, _ = model.UnmarshalRecord(oldValue)
+			}
+			
+			if isDelete {
+				core.UpdateGSI(totalBatch, schema, oldRecord, nil)
+				totalBatch.Delete([]byte(levelDBKey))
+			} else {
+				core.UpdateGSI(totalBatch, schema, oldRecord, itemData)
+				value, _ := model.MarshalRecord(itemData)
+				totalBatch.Put([]byte(levelDBKey), value)
+			}
+		}
+	}
+	
+	if err := s.Database.DB.Write(totalBatch, nil); err != nil {
+		s.writeDynamoDBError(w, "InternalServerError", "Internal DB error during batch write.", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{}`))
+}
