@@ -69,6 +69,8 @@ func (s *Server) dynamoDBHandler(w http.ResponseWriter, r *http.Request) {
 		s.handleQuery(w, body)
 	case "TransactWriteItems":
 		s.handleTransactWriteItems(w, body)
+	case "UpdateItem":
+		s.handleUpdateItem(w, body)
 	default:
 		s.writeDynamoDBError(w, "UnsupportedOperationException", fmt.Sprintf("Operation %s is not supported by the emulator.", operation), http.StatusBadRequest)
 	}
